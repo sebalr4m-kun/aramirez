@@ -1,8 +1,12 @@
-# MainExample.py — OnlineAshes API (despliegue en servidor externo)
-# Uso:
-#   DB_HOST=127.0.0.1 DB_USER=... DB_PASSWORD=... JWT_SECRET=... uvicorn MainExample:app --host 0.0.0.0 --port 8000
+# MainExample.py — OnlineAshes API (VPS + nginx /api/ → :8001)
+# Arranque típico:
+#   ./scripts/start-api.sh
+#   # o:
+#   source .venv/bin/activate
+#   export DB_USER=onlineashes DB_PASSWORD='...' DB_NAME=onlineashes
+#   uvicorn MainExample:app --host 127.0.0.1 --port 8001
 #
-# El launcher apunta a: http://IP_O_DOMINIO:8000  (variable ASHES_API_BASE)
+# Launcher: API_BASE = "http://201.32.129.48/api"
 
 from __future__ import annotations
 
@@ -20,15 +24,12 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
 
 
-# =============================================================================
-# CONFIG — por entorno (no hardcodees passwords en git)
-# =============================================================================
-
 class Settings:
-    # API en el mismo Linux que MySQL → siempre localhost
+    # MySQL en el mismo server (no la IP pública)
     DB_HOST: str = os.getenv("DB_HOST", "127.0.0.1")
     DB_PORT: int = int(os.getenv("DB_PORT", "3306"))
-    DB_USER: str = os.getenv("DB_USER", "root")
+    # Usuario de aplicación (root usa auth_socket y falla por TCP)
+    DB_USER: str = os.getenv("DB_USER", "onlineashes")
     DB_PASSWORD: str = os.getenv("DB_PASSWORD", "N5/Ro9!R/h&RRn")
     DB_NAME: str = os.getenv("DB_NAME", "onlineashes")
 
@@ -52,7 +53,6 @@ _pool_error: Optional[str] = None
 
 
 def init_pool() -> None:
-    """Crea el pool. No tumba el proceso si falla: deja _pool_error."""
     global _pool, _pool_error
     if _pool is not None:
         return
@@ -72,7 +72,8 @@ def init_pool() -> None:
         )
         _pool_error = None
         print(
-            f"[API] Pool OK → {settings.DB_USER}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
+            f"[API] Pool OK → {settings.DB_USER}@{settings.DB_HOST}:"
+            f"{settings.DB_PORT}/{settings.DB_NAME}"
         )
     except Exception as e:
         _pool = None
@@ -91,10 +92,6 @@ def get_conn():
         )
     return _pool.get_connection()
 
-
-# =============================================================================
-# PASSWORDS / JWT
-# =============================================================================
 
 def normalize_php_hash(hash_guardado: str) -> bytes:
     if not hash_guardado:
@@ -157,10 +154,6 @@ def generar_clave_drm() -> str:
     return secrets.token_hex(16)
 
 
-# =============================================================================
-# SCHEMAS
-# =============================================================================
-
 class LoginIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1)
@@ -213,10 +206,6 @@ class MsgOut(BaseModel):
     message: str
 
 
-# =============================================================================
-# APP
-# =============================================================================
-
 app = FastAPI(
     title=settings.API_TITLE,
     version=settings.API_VERSION,
@@ -235,11 +224,10 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup():
-    # No aborta el proceso si MySQL falla
     init_pool()
     print(
         f"[API] {settings.API_VERSION} · host={settings.DB_HOST} · "
-        f"JWT fijo · expire={settings.JWT_EXPIRE_HOURS}h"
+        f"user={settings.DB_USER} · JWT fijo · expire={settings.JWT_EXPIRE_HOURS}h"
     )
 
 
@@ -253,10 +241,6 @@ def usuario_actual(
         raise HTTPException(status_code=401, detail="Token incompleto.")
     return data
 
-
-# =============================================================================
-# HEALTH
-# =============================================================================
 
 @app.get("/health")
 def health():
@@ -290,10 +274,6 @@ def health():
             "error": str(e),
         }
 
-
-# =============================================================================
-# AUTH — LOGIN
-# =============================================================================
 
 @app.post("/auth/login", response_model=LoginOut)
 def login(body: LoginIn):
@@ -344,10 +324,6 @@ def login(body: LoginIn):
         conn.close()
 
 
-# =============================================================================
-# AUTH — REGISTRO
-# =============================================================================
-
 @app.post("/auth/register", response_model=MsgOut)
 def register(body: RegisterIn):
     conn = get_conn()
@@ -381,10 +357,6 @@ def register(body: RegisterIn):
         conn.close()
 
 
-# =============================================================================
-# PERFIL
-# =============================================================================
-
 @app.get("/auth/me")
 def me(user: dict = Depends(usuario_actual)):
     conn = get_conn()
@@ -406,10 +378,6 @@ def me(user: dict = Depends(usuario_actual)):
     finally:
         conn.close()
 
-
-# =============================================================================
-# VERSIONES
-# =============================================================================
 
 @app.get("/versiones", response_model=List[VersionOut])
 def listar_versiones(user: dict = Depends(usuario_actual)):
@@ -434,10 +402,6 @@ def listar_versiones(user: dict = Depends(usuario_actual)):
     finally:
         conn.close()
 
-
-# =============================================================================
-# LICENCIAS
-# =============================================================================
 
 @app.get("/licencias", response_model=List[LicenciaOut])
 def listar_licencias(user: dict = Depends(usuario_actual)):
@@ -468,10 +432,6 @@ def listar_licencias(user: dict = Depends(usuario_actual)):
     finally:
         conn.close()
 
-
-# =============================================================================
-# LAUNCHER SYNC
-# =============================================================================
 
 @app.get("/launcher/sync")
 def launcher_sync(user: dict = Depends(usuario_actual)):
@@ -539,10 +499,6 @@ def launcher_sync(user: dict = Depends(usuario_actual)):
         conn.close()
 
 
-# =============================================================================
-# COMPRA
-# =============================================================================
-
 @app.post("/licencias/comprar", response_model=MsgOut)
 def comprar_version(body: ComprarIn, user: dict = Depends(usuario_actual)):
     conn = get_conn()
@@ -588,17 +544,13 @@ def comprar_version(body: ComprarIn, user: dict = Depends(usuario_actual)):
         conn.close()
 
 
-# =============================================================================
-# ENTRYPOINT
-# =============================================================================
-
 if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
         "MainExample:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "8001")),
         reload=False,
         log_level="info",
     )
